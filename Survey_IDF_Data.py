@@ -3,10 +3,10 @@ import pandas as pd
 import os
 from datetime import datetime
 
-# --- File Paths ---
-input_file = r'D:\A\DAILY REPORTS\Shailendra_Sir_Project\IDF_ACCT_ID.csv'
-output_file = r'D:\A\DAILY REPORTS\Shailendra_Sir_Project\load_data.csv'
-image_folder = r'D:\A\DAILY REPORTS\Shailendra_Sir_Project\idf_images'
+# --- File Paths (Relative paths for cloud) ---
+input_file = 'IDF_ACCT_ID.csv'
+output_file = 'load_data.csv'
+image_folder = 'idf_images'
 os.makedirs(image_folder, exist_ok=True)
 
 # --- Input File Check ---
