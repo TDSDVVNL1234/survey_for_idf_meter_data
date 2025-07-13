@@ -2,115 +2,106 @@ import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
+from google.oauth2.service_account import Credentials
+import gspread
 from pydrive.auth import GoogleAuth
 from pydrive.drive import GoogleDrive
-import gspread
-from google.oauth2.service_account import Credentials
-from PIL import Image
-import io
 
-# --- Google Configuration ---
+# --- Constants ---
+CREDENTIALS_FILE = 'credentials.json'
 GOOGLE_SHEET_ID = '1UGrGEtWy5coI7nduIY8J8Vjh9S0Ahej7ekDG_4nl-SQ'
 DRIVE_FOLDER_ID = '1l6N7Gfd8T1V8t3hR2OuLn5CDtBuzjsKu'
-CREDENTIALS_FILE = 'credentials.json'
 
-# --- Authenticate Google Drive ---
-gauth = GoogleAuth()
-gauth.LoadCredentialsFile(CREDENTIALS_FILE)
-if gauth.credentials is None:
-    gauth.LocalWebserverAuth()
-elif gauth.access_token_expired:
-    gauth.Refresh()
-else:
-    gauth.Authorize()
-gauth.SaveCredentialsFile(CREDENTIALS_FILE)
-drive = GoogleDrive(gauth)
-
-# --- Authenticate Google Sheets ---
+# --- Google Sheets Auth ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
 client = gspread.authorize(credentials)
 sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
 
-# --- Load Local Data ---
-input_file = 'IDF_ACCT_ID.csv'
-df = pd.read_csv(input_file)
+# --- Google Drive Auth ---
+gauth = GoogleAuth()
+gauth.DEFAULT_SETTINGS['client_config_file'] = CREDENTIALS_FILE
+gauth.LocalWebserverAuth()
+drive = GoogleDrive(gauth)
 
-# --- Streamlit UI ---
+# --- Load ACCT_ID master CSV ---
+if not os.path.exists("IDF_ACCT_ID.csv"):
+    st.error("❌ 'IDF_ACCT_ID.csv' not found in app folder.")
+    st.stop()
+
+df = pd.read_csv("IDF_ACCT_ID.csv")
+
+# --- UI ---
 st.title("Supervisor Field Survey – IDF Cases")
-st.caption("Please fill this form after on-site verification of IDF accounts.")
+st.caption("Please fill this form after on-site verification.")
 
-acct_id_input = st.text_input("**ENTER ACCT_ID**", max_chars=10)
-if acct_id_input and not acct_id_input.isdigit():
-    st.error("❌ ACCT_ID should be numeric only.")
+acct_id = st.text_input("Enter ACCT_ID", max_chars=10)
 
-if acct_id_input:
-    match = df[df["ACCT_ID"].astype(str) == acct_id_input.strip()]
-    if not match.empty:
-        st.success("✅ ACCT_ID matched. Details below:")
+if acct_id:
+    match = df[df["ACCT_ID"].astype(str) == acct_id.strip()]
+    if match.empty:
+        st.error("❌ ACCT_ID not found.")
+    else:
+        row = match.iloc[0]
         fields = {
-            "ZONE": match.iloc[0]["ZONE"],
-            "CIRCLE": match.iloc[0]["CIRCLE"],
-            "DIVISION": match.iloc[0]["DIVISION"],
-            "SUB-DIVISION": match.iloc[0]["SUB-DIVISION"]
+            "ZONE": row["ZONE"],
+            "CIRCLE": row["CIRCLE"],
+            "DIVISION": row["DIVISION"],
+            "SUB-DIVISION": row["SUB-DIVISION"]
         }
 
+        st.success("✅ ACCT_ID matched:")
         cols = st.columns(len(fields))
         for col, (label, value) in zip(cols, fields.items()):
-            col.markdown(f"<b>{label}:</b><br>{value}", unsafe_allow_html=True)
-
-        st.markdown("---")
+            col.markdown(f"**{label}**: {value}")
 
         remark_options = {
             "OK": ["METER SERIAL NUMBER", "METER IMAGE", "READING", "DEMAND"],
-            "DEFECTIVE METER": ["METER SERIAL NUMBER", "METER IMAGE"],
             "NO METER AT SITE": ["PREMISES IMAGE"],
             "PDC": ["METER IMAGE", "PREMISES IMAGE", "DOCUMENT RELATED TO PDC"]
         }
 
         selected_remark = st.selectbox("Select REMARK", [""] + list(remark_options.keys()))
-
         if selected_remark:
-            mobile_no = st.text_input("Enter Consumer Mobile Number (10 digits)", max_chars=10)
-            input_data = {}
-            uploaded_images = {}
+            st.subheader("Additional Inputs")
+            mobile = st.text_input("Consumer Mobile Number (10 digits)")
+
+            images = {}
+            inputs = {}
 
             for field in remark_options[selected_remark]:
                 if "IMAGE" in field or "DOCUMENT" in field:
-                    uploaded = st.file_uploader(f"Upload {field}", type=["jpg", "jpeg", "png"], key=field)
+                    uploaded = st.file_uploader(f"Upload {field}", type=["jpg", "jpeg", "png"])
                     if uploaded:
-                        uploaded_images[field] = uploaded
+                        file_name = f"{acct_id}_{field.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+                        file_drive = drive.CreateFile({
+                            'title': file_name,
+                            'parents': [{'id': DRIVE_FOLDER_ID}]
+                        })
+                        file_drive.SetContentFile(uploaded.name)
+                        with open(uploaded.name, 'wb') as f:
+                            f.write(uploaded.read())
+                        file_drive.Upload()
+                        images[field] = file_drive['alternateLink']
                 else:
-                    value = st.text_input(field)
-                    input_data[field.replace(" ", "_").upper()] = value
+                    inputs[field] = st.text_input(f"{field}")
 
             if st.button("✅ Submit"):
-                uploaded_links = {}
-                for field, file_data in uploaded_images.items():
-                    filename = f"{acct_id_input}_{field.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-                    file_drive = drive.CreateFile({'title': filename, 'parents': [{'id': DRIVE_FOLDER_ID}]})
-                    file_drive.SetContentString(file_data.read().decode("ISO-8859-1"))
-                    file_drive.Upload()
-                    uploaded_links[field] = file_drive['alternateLink']
-
-                # Prepare row to push to Google Sheet
-                row = [
-                    acct_id_input,
+                row_data = [
+                    acct_id,
                     selected_remark,
                     fields["ZONE"],
                     fields["CIRCLE"],
                     fields["DIVISION"],
                     fields["SUB-DIVISION"],
-                    mobile_no,
-                    "",  # REQUIRED_REMARK (can be improved)
-                    input_data.get("METER_SERIAL_NUMBER", ""),
-                    input_data.get("READING", ""),
-                    input_data.get("DEMAND", ""),
-                    uploaded_links.get("METER IMAGE", ""),
-                    uploaded_links.get("PREMISES IMAGE", ""),
-                    uploaded_links.get("DOCUMENT RELATED TO PDC", "")
+                    mobile,
+                    "",  # REQUIRED_REMARK placeholder
+                    inputs.get("METER SERIAL NUMBER", ""),
+                    inputs.get("READING", ""),
+                    inputs.get("DEMAND", ""),
+                    images.get("METER IMAGE", ""),
+                    images.get("PREMISES IMAGE", ""),
+                    images.get("DOCUMENT RELATED TO PDC", "")
                 ]
-                sheet.append_row(row)
-                st.success("🎉 Data submitted and saved successfully in Google Sheet and Drive!")
-    else:
-        st.error("❌ ACCT_ID not found. Please check and try again.")
+                sheet.append_row(row_data)
+                st.success("✅ Data and images saved permanently!")
